@@ -1,0 +1,277 @@
+OnePlus 7 Pro (guacamole) vs OnePlus 7T Pro 5G McLaren (hotdogg)
+==================================================================
+
+Source checked
+--------------
+
+Repository: https://github.com/OnePlusOSS/android_kernel_oneplus_sm8150
+Checkout: work/oneplus-sm8150-kernel
+Branch used: oneplus/SM8150_SDX50M_Q_10.0
+HEAD: 31bebb6ffc476f51986bd04502a76ffbd9e2fa7a
+
+This is the OnePlusOSS Qualcomm SDX55M/5G-specific branch, selected because
+it contains hotdogg-sdx55m-overlay-{dvt,pvt}.dts, hotdogg-sdx55m.dtsi and the
+SDX5x external-modem descriptions. The branch name says SDX50M, but the
+hotdogg board DTS and modem nodes explicitly say SDX55M. This is the relevant
+vendor branch for the 5G McLaren variant. It is not the default branch
+(oneplus/SM8150_P_9.0). The checked-out tree is shallow (depth 1), sparse,
+unmodified, and not part of the project's Git repository.
+
+Sparse paths checked out:
+  arch/arm64/boot/dts
+  arch/arm64/configs
+  drivers/esoc
+  drivers/gpu/drm/msm
+  drivers/input/touchscreen
+  drivers/misc
+  drivers/pci/host
+  drivers/platform/msm
+  drivers/power/supply
+  drivers/soc/qcom
+
+There is no techpack/audio directory in this branch. Audio board descriptions
+are in arch/arm64/boot/dts/qcom/sm8150-mtp-audio-overlay.dtsi and the included
+sm8150-audio-overlay.dtsi; these small DTS files are within the checked-out
+DTS directory.
+
+Board DTS selection and identity
+--------------------------------
+
+The DTS overlays are Qualcomm MTP-based board descriptions; they do not name
+the retail T-Mobile SKU HD1925. The hotdogg overlay is the vendor's SDX55M
+19861 board definition, which is the source match for the 7T Pro 5G McLaren.
+Confirm the actual phone's bootloader-selected DTBO/project/hardware ID before
+using this overlay on a device.
+
+Guacamole / OnePlus 7 Pro:
+  Base: sm8150-mtp.dts (Qualcomm SM8150 MTP; qcom,sm8150-mtp,
+        qcom,sm8150, qcom,mtp; board-id <8 0>).
+  DVT overlay: guacamole-overlay-dvt.dts; includes
+    sm8150-mtp.dtsi, sm8150-mtp-audio-overlay.dtsi, sm8150-oem.dtsi,
+    sm8150-oem-camera-t0.dtsi, guacamole.dtsi, guacamole_sm8150.dtsi,
+    guacamole_t0.dtsi, guacamole_evt1.dtsi, guacamole_evt2.dtsi,
+    guacamole_evt3.dtsi, guacamole_dvt.dtsi.
+    Model "MTP 18821 18831 15"; compatible
+    "qcom,sm8150-mtp", "qcom,sm8150", "qcom,mtp"; board-id <8 0>;
+    project-id <18821 18831>; hw-id <15>.
+  PVT overlay: guacamole-overlay-pvt.dts; same shared include chain, with
+    guacamole_pvt.dtsi additionally included.
+    Model "MTP 18821 18831 21 22"; same compatible and board-id;
+    project-id <18821 18831>; hw-id <21 22>.
+
+Hotdogg / OnePlus 7T Pro 5G McLaren:
+  Base: sm8150-mtp.dts (same Qualcomm SM8150 MTP compatible and base board-id).
+  DVT overlay: hotdogg-sdx55m-overlay-dvt.dts; includes
+    sm8150-mtp.dtsi, sdx5xm-external-soc.dtsi, sm8150-sdxprairie.dtsi,
+    sm8150-mtp-audio-overlay.dtsi, sm8150-oem-camera-hotdog-t0.dtsi,
+    hotdogg-sdx55m-ois.dtsi, sm8150-oem.dtsi, hotdog.dtsi,
+    hotdogg-sdx55m.dtsi, hotdog_dvt.dtsi.
+    Model "SDX55M MTP 19861 51 52"; compatible
+    "qcom,sm8150-mtp", "qcom,sm8150", "qcom,mtp"; board-id <8 2>;
+    project-id <19861>; hw-id <51 52>.
+  PVT overlay: hotdogg-sdx55m-overlay-pvt.dts; same chain, ending in
+    hotdog_pvt.dtsi instead of hotdog_dvt.dtsi.
+    Model "SDX55M MTP 19861 53 54"; same compatible and board-id;
+    project-id <19861>; hw-id <53 54>.
+
+Meaningful identity delta: hotdogg changes the board-id from <8 0> to <8 2>,
+uses project 19861 and hardware IDs 51/52 (DVT) or 53/54 (PVT), and adds the
+external SDX55 modem. The top-level compatible remains the same MTP/SM8150
+string on both, so the project/hardware IDs and overlay selection distinguish
+the product here.
+
+Shared files reached through the base MTP include chain include
+sm8150.dtsi, sm8150-pmic-overlay.dtsi, sm8150-sde-display.dtsi,
+sm8150-camera-sensor-mtp.dtsi, sm8150-thermal-overlay.dtsi,
+sm8150-audio-overlay.dtsi, sm8150-wcd.dtsi and msm-wsa881x.dtsi. The active
+OnePlus panel is supplied by dsi-panel-samsung_oneplus_dsc.dtsi.
+
+Reserved memory
+---------------
+
+Addresses and sizes below are the final values after the selected overlay
+includes. Base values common to both come from sm8150.dtsi. Sizes are hex.
+The hotdogg SDX55 overlays remap the modem/DSP/IPA reservation block; other
+fixed regions remain the same.
+
+Node                Guacamole reg (base, size)       Hotdogg reg (base, size)
+------------------  ------------------------------  ------------------------------
+hyp_mem             0x85700000, 0x00600000           same
+xbl_aop_mem         0x85e00000, 0x00140000           same
+smem_region         0x86000000, 0x00200000           same
+removed_regions     0x86200000, 0x05500000           same
+pil_camera_mem      0x8b700000, 0x00500000           same
+pil_wlan_fw_mem     0x8bc00000, 0x00180000           same
+pil_npu_mem         0x8bd80000, 0x00080000           same
+pil_adsp_mem        0x8be00000, 0x01a00000           0x8be00000, 0x01e00000
+pil_modem_mem       0x8d800000, 0x09600000           0x8dc00000, 0x03200000
+pil_video_mem       0x96e00000, 0x00500000           0x90e00000, 0x00500000
+pil_slpi_mem        0x97300000, 0x01400000           0x91300000, 0x01500000
+pil_ipa_fw_mem      0x98700000, 0x00010000           0x92800000, 0x00010000
+pil_ipa_gsi_mem     0x98710000, 0x00005000           0x92810000, 0x0000a000
+pil_gpu_mem         0x98715000, 0x00002000           0x9281a000, 0x00002000
+pil_spss_mem        0x98800000, 0x00100000           0x92900000, 0x00100000
+pil_cdsp_mem        0x98900000, 0x01400000           0x92a00000, 0x01400000
+qseecom_mem         0x9e400000, 0x01400000           same
+cdsp_sec_mem        0xa4c00000, 0x03c00000           same
+cont_splash_memory  0x9c000000, 0x02400000           same
+disp_rdump_memory   0x9c000000, 0x02400000           same
+
+SDX55M also includes sm8150-sdxprairie.dtsi, which adds a dynamic 0x20000
+mailbox_mem shared-DMA pool (size-only; no fixed reg). The shared base DTS
+also has size-only reusable pools: adsp_mem 16 MiB, cdsp_mem 4 MiB,
+user_contig_mem 16 MiB, qseecom_ta_mem 16 MiB, sp_mem 8 MiB,
+secure_display_memory 160 MiB, dump_mem 36 MiB, and linux,cma 40 MiB.
+These nodes have size but no reg, so are separated from the fixed reg table.
+
+Display / panel
+---------------
+
+No board-specific panel difference was found in these overlay chains. Both
+include the common SM8150 DSI panel catalog and MTP panel supplies. The active
+OnePlus-specific panel node in dsi-panel-samsung_oneplus_dsc.dtsi is
+dsi_samsung_oneplus_dsc_cmd: "samsung dsc cmd mode oneplus dsi panel". It
+declares the 1440x3120 mode (and lower-resolution variants) and is marked
+qcom,dsi-display-active. The primary display is DSI controller/PHY 0.
+
+For both:
+  - Reset: TLMM GPIO 6; reset timing GPIO 78 also supplied by the active
+    Samsung OnePlus panel node. TE: TLMM GPIO 8. Panel mode is command-mode.
+  - Panel supplies: dsi_panel_pwr_supply = vddio 1.8 V, LAB and IBB each
+    configured 4.6–6.0 V. Backlight is DCS-controlled, levels 1–1023.
+  - The same DTS catalog also contains SW43404 BOE AMOLED DSC variants and
+    other generic panels, but those are not the active OnePlus node in this
+    overlay set.
+
+Touchscreen
+-----------
+
+Both board chains inherit sm8150-oem.dtsi's QUPv3 SE17 I2C touchscreen
+devices. The principal node is sec-s6sy761@48 (compatible "sec-s6sy761",
+address 0x48), with reset TLMM GPIO 54, IRQ TLMM GPIO 122, supply
+pm8150_l17 (nominal 3.008 V), and the GPIO119 1.8 V pinctrl state. The DTS
+also describes an alternate synaptics-s3706@20 node on the same I2C bus
+(address 0x20); the board files do not delete it for these variants.
+
+Differences: guacamole's project-name is 18821. hotdog.dtsi first sets
+19801, then hotdogg-sdx55m.dtsi overrides it to 19861 and adds
+module_id_support=1 and fp_coordinate_support=1. Thus driver, bus, address,
+reset/IRQ GPIOs and regulator wiring match, while the project calibration
+and hotdogg fingerprint-coordinate capability differ. guacamole_t0.dtsi
+and hotdogg retain the common GPIO119 T0 touch pinctrl.
+
+PMIC, charger, battery and fuel gauge
+-------------------------------------
+
+The PMIC topology is shared: PM8150, PM8150B, PM8150L and PM8009 nodes and
+the PM8150B charger/fuel-gauge drivers are inherited from the SM8150 MTP
+tree. The PM8150B fuel gauge references mtp_batterydata; charger policy
+also uses that battery-data node.
+
+Differences:
+  - Guacamole includes OP-fg-batterydata-4000mah.dtsi.
+  - Hotdog includes OP-fg-batterydata-4085mah.dtsi and marks the
+    oneplus_fastchg@26 controller for 4085 mAh / 4.45 V support; the
+    hotdogg SDX55 overlay also sets op,4085mAh_4p45_support.
+  - Both board variants tune the PM8150B charger, including 2 A FCC and
+    1.8 A USB ICL values in the DVT/PVT files. The board-specific ship-mode,
+    VBUS-control and fast-charge GPIO arrangement is broadly shared
+    (TLMM GPIO 21; PM8150 GPIO 9; MCU enable TLMM GPIO 10). Hotdogg adds
+    lcd-psm-not-support for the SDX55M board.
+
+Haptics
+-------
+
+The same AW8697 haptic controller appears in sm8150-oem.dtsi for both:
+awinic,aw8697_haptic at I2C address 0x5a on QUPv3 SE7; reset TLMM GPIO 116,
+IRQ TLMM GPIO 24. Both also inherit the PM8150B internal LRA haptics node
+(qcom,haptics@c000; 3.4 V vmax, 6667-us play period) from pm8150b.dtsi.
+No hotdogg-only haptic-controller substitution was found.
+
+Cameras
+-------
+
+Both overlay chains include a board-family camera file with the same four
+generic qcom,cam-sensor slots; the hotdogg file is named
+sm8150-oem-camera-hotdog-t0.dtsi and the guacamole file
+sm8150-oem-camera-t0.dtsi. Their sensor-node wiring is the same in this
+branch; the DTS uses generic qcom,cam-sensor nodes, not sensor chip names.
+The sensor libraries/configuration identify the actual modules at runtime.
+
+Common logical slots (all on Qualcomm CCI, not a direct Linux I2C address):
+  - slot 0, rear primary: CCI device 0 / master 1; CSIPHY index 1.
+  - slot 1, rear secondary: CCI device 0 / master 0; CSIPHY index 0.
+  - slot 2, front: CCI device 1 / master 0; CSIPHY index 2.
+  - slot 3, rear third: CCI device 1 / master 1; CSIPHY index 3.
+Both expose the same camera reset/clock/regulator GPIO and PMIC wiring in
+these files. The hotdogg include chain adds its SDX55-era OIS overlay; the
+OIS gyro ID remains 1 for the rear OIS devices, as in guacamole.
+
+Audio codec and amplifier
+-------------------------
+
+Both use sm8150-mtp-audio-overlay.dtsi, which includes the common
+sm8150-audio-overlay.dtsi. The common audio graph describes Qualcomm WCD9360
+(PAHU) and WCD934x (Tavil) codec paths and WSA881x smart-speaker amplifier
+devices. No hotdogg-specific codec or amplifier substitution was found; the
+MTP audio overlay sets wsa-max-devs to 1 for both. No techpack/audio DTS
+directory exists in this branch.
+
+Wi-Fi and Bluetooth
+-------------------
+
+The base SM8150 MTP WLAN/CNSS/ICNSS and WCN3990 Bluetooth descriptions are
+shared by both board overlays. Bluetooth is compatible "qca,wcn3990" and
+uses PM8150/PM8150L supplies. The base has the same WLAN enable GPIO 169,
+ICNSS firmware-memory reference, and WLAN SMMU/CNSS resources for both.
+No hotdogg-specific Wi-Fi or Bluetooth chipset node change was found.
+
+SDX55 / ESOC / PCIe — hotdogg only
+---------------------------------
+
+The hotdogg overlay includes sdx5xm-external-soc.dtsi and
+sm8150-sdxprairie.dtsi. These add mdm3 as compatible "qcom,ext-sdxprairie",
+connect it to PCIe1 and MHI (mhi_0), and declare the ESOC modem link, MHI
+channels, modem reset/status/error GPIOs, QRTR links and SDX55 ramdump/
+shutdown support. The hotdogg layer also enables SDX55 SSR-reason and RF
+cable uevent properties. Guacamole's selected non-SDX50 overlay has no
+external modem/ESOC/PCIe1/MHI modem chain. This is an SDX55 modem path, not
+an X50 node.
+
+USB / Type-C
+------------
+
+Both inherit the same PM8150B Type-C/PD PHY, USB role/extcon and QMP PHY
+framework from sm8150.dtsi, pm8150b.dtsi and sm8150-mtp.dtsi. Both board
+chains customize usb2_phy0 analog tuning and set extcon_usb1 and usb1 to
+disabled in their T0/product DTSI. This is a matching DTS setting, not proof
+that the physical USB-C connector is unusable; the PD controller and other
+USB/DP PHY nodes remain in the base description. Guacamole's T0 file
+additionally overrides the QMP DP PHY supply from PM8150L L18. I did not
+find that same explicit QMP supply override in hotdogg; common DP/Type-C
+nodes remain inherited.
+
+Difference summary
+------------------
+
+  - Same SM8150 platform, top-level MTP compatible, primary Samsung OnePlus
+    DSC DSI panel, touchscreen controller wiring, AW8697/PM8150B haptics, camera
+    sensor-slot wiring, WCD/WSA audio topology, and WCN3990/ICNSS WLAN/BT.
+  - Hotdogg identifies as board-id 8/2, project 19861, hardware IDs 51–54;
+    guacamole identifies as board-id 8/0, projects 18821/18831, hardware
+    IDs 15 or 21/22.
+  - Hotdogg adds the SDX55 external cellular modem via ESOC + PCIe1/MHI and
+    relocates several DSP/modem reserved-memory ranges for it.
+  - Battery profile differs (4000 mAh guacamole vs 4085 mAh hotdogg); hotdogg
+    adds 4.45 V fast-charge and LCD PSM policy flags.
+  - Touch project calibration/fingerprint-coordinate feature differs; touch
+    hardware wiring and supplies match.
+  - No haptics, Wi-Fi/BT, audio-amp, or camera sensor-slot hardware change
+    is visible in these selected DVT/PVT overlay chains.
+
+Source notes
+------------
+
+All findings are from the checked-out vendor DTS sources listed above; no
+phone was accessed. The checkout is only a source preparation/census and was
+not added to the repository's Git index or committed.
