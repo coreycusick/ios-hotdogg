@@ -23,3 +23,8 @@ work/
 launchd.plist.*
 *.tmp
 _to_delete/
+# iOSOnAnd tracker: key and CLI stay out of git
+.env
+.env.*
+cli.mjs
+TRACKER_QUEUE.md
