@@ -1,21 +1,20 @@
-# iOS 27.2 on the OnePlus 7T Pro / 7T Pro 5G McLaren (hotdog / hotdogg)
+# iOS 27.2 on the OnePlus 7T Pro 5G McLaren (hotdogg)
 
 This repository brings the iOS 27.2 port from the OnePlus 7 Pro ([ios-guacamole](https://github.com/coreycusick/ios-guacamole))
-to the OnePlus 7T Pro family: the same Qualcomm SM8150 platform (Snapdragon 855+, Adreno 640), the same panel and touch
-controller, but a different board, memory map and partition layout. This is the `ios27` branch; macOS 27 is on `macos27`.
+to the OnePlus 7T Pro 5G McLaren: the same Qualcomm SM8150 platform (Snapdragon 855+, Adreno 640), the same panel and
+touch controller, but a different board (with an external SDX55 5G modem), memory map and partition layout. This is the `ios27` branch; macOS 27 is on `macos27`.
 
 ## Status
 
-**Not booting.** Bring-up has not started: nothing in this repository has run on either device yet.
+**Not booting.** Bring-up has not started: nothing in this repository has run on the device yet.
 
 | Device | Codename | Models | RAM / storage | Status |
 |---|---|---|---|---|
-| OnePlus 7T Pro 5G McLaren (T-Mobile) | `hotdogg` | HD1925 | 12 GB / 256 GB | **Not booting** (primary target; bring-up not started) |
-| OnePlus 7T Pro | `hotdog` | HD1910, HD1911, HD1913 | 8 GB / 256 GB (McLaren Edition 12 GB) | **Not booting** (not started; expected to need only small board changes) |
+| OnePlus 7T Pro 5G McLaren (T-Mobile) | `hotdogg` | HD1925 | 12 GB / 256 GB | **Not booting** (bring-up not started) |
 
 The iOS 27 port works on the OnePlus 7 Pro (`guacamole`): see the README and `docs/ios27.md` of
 [ios-guacamole](https://github.com/coreycusick/ios-guacamole). Most of that work is expected to carry over, but none of it
-is confirmed on these phones until they boot.
+is confirmed on this phone until it boots.
 
 ## Device notes and plan
 
@@ -33,7 +32,7 @@ The `guacamole` remote points at ios-guacamole so fixes can be merged in either 
 
 ## Security and artifacts
 
-Development on the owner's devices only: code-signing, sandbox and other security paths are modified or stubbed. iOS
+Development on the owner's device only: code-signing, sandbox and other security paths are modified or stubbed. iOS
 firmware, root images, device dumps (EDL backups, `persist`, `modemst*`, `fsg`: they hold the IMEI), credentials and
 build trees are not source-controlled.
 
