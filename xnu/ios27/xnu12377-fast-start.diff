@@ -1,0 +1,81 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -209,12 +209,21 @@
+ }
+ 
+ /* With boot-arg ufslogsecs=1 the persistent log flushes every second: a
+- * pause before a risky access keeps the last line if the access hangs. */
++ * pause before a risky access keeps the last line if the access hangs.
++ * 2026-11-26 (faster startup): the 2.5 s pause only when ufslogsecs is on the command line (bring-up debugging);
++ * the 16 pauses were ~40 s of every boot. */
+ static void
+ gpu_checkpoint(const char *what)
+ {
++	static int pause = -1;
++	if (pause < 0) {
++		unsigned secs;
++		pause = PE_parse_boot_argn("ufslogsecs", &secs, sizeof(secs)) ? 1 : 0;
++	}
+ 	printf("SWEET GPU: checkpoint: %s\n", what);
+-	gpu_wait_ms(2500);
++	if (pause) {
++		gpu_wait_ms(2500);
++	}
+ }
+ 
+ static void
+@@ -2999,10 +3008,14 @@
+ static void
+ gpu_thread(void *arg, wait_result_t result)
+ {
+-	unsigned delay_s = 60;
++	unsigned delay_s = 2;
+ 	(void)arg;
+ 	(void)result;
+-	/* After root mount, the lock screen and the touch driver (45 s). */
++	/*
++	 * Was 60 s (after root mount, the lock screen and the touch driver) while bring-up could hang the SoC.
++	 * 2026-11-26: 2 s, so the GPU is ready before WindowServer/backboardd draw; touch starts at 2 s too,
++	 * haptics at 4 s (sweet_touch.c, sweet_haptic.c). sweetgpudelay=SECS still overrides.
++	 */
+ 	(void)PE_parse_boot_argn("sweetgpudelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET GPU: Adreno 640 stage 1 (read-only) in %u s\n", delay_s);
+ 	gpu_wait_ms(delay_s * 1000u);
+@@ -3045,7 +3058,14 @@
+ 	} else {
+ 		printf("SWEET GPU: CX domain on after ABL: GMU state is read in stage 2\n");
+ 	}
+-	gpu_fw_report();
++	/* The firmware comes from the ADT; this only lists the copies on the root, which may not be mounted yet. */
++	vnode_t root = vfs_rootvnode();
++	if (root != NULLVP) {
++		vnode_put(root);
++		gpu_fw_report();
++	} else {
++		printf("SWEET GPU: root not mounted yet: firmware file report skipped (the ADT copies are used)\n");
++	}
+ 	printf("SWEET GPU: stage 1 done\n");
+ 	if (gpu_stage >= 2 && gpu_stage2(gcc, gpucc) && gpu_stage >= 3 && gpu_stage3() &&
+ 	    gpu_stage >= 4 && gpu_stage4() && gpu_stage >= 5 && gpu_stage5() && gpu_stage >= 6 &&
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -540,7 +540,7 @@
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+-	unsigned delay_s = 45;
++	unsigned delay_s = 2;	/* 2026-11-26: was 45 s; the GPU starts at 2 s too */
+ 	(void)arg;
+ 	(void)result;
+ 	/*
+--- a/bsd/dev/sweet_haptic.c
++++ b/bsd/dev/sweet_haptic.c
+@@ -905,7 +905,7 @@
+ {
+ 	(void)arg;
+ 	(void)result;
+-	unsigned delay_s = 50;
++	unsigned delay_s = 4;	/* 2026-11-26: was 50 s; after touch and the GPU (2 s) */
+ 	(void)PE_parse_boot_argn("sweethapticdelay", &delay_s, sizeof(delay_s));
+ 	hap_wait(delay_s * 1000u);
+ 	hp.gcc = ml_io_map(HAP_GCC_PA, 0x60000);
