@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mkmenuboot.py - one boot image for boot_b with the boot menu, iOS 27 and (later) macOS 27:
 
-  python3 tools/mkmenuboot.py STOCK_boot.img SHIM.Image --ios-kernel work/xnu-12377/BUILD/obj-ios26-sweet/... [--macos-kernel work/xnu-12377/BUILD/obj-macos27-sweet/...] IOS27_boot.img [MACOS27_boot.img] OUT.img
+  python3 tools/mkmenuboot.py [--board guacamole|hotdogg] STOCK_boot.img SHIM.Image --ios-kernel work/xnu-12377/BUILD/obj-ios26-sweet/... [--macos-kernel work/xnu-12377/BUILD/obj-macos27-sweet/...] IOS27_boot.img [MACOS27_boot.img] OUT.img
 
 2026-11-20: replaces tools/mktripleboot.py after the partition split (iOS 16 removed). IOS27_boot.img /
 MACOS27_boot.img are ordinary boot images as tools/guac-mkboot.sh makes them (iOS 27: ufsroot=ios27;
@@ -11,6 +11,12 @@ into one ramdisk, iOS 27 first, each starting on a 4 KiB boundary (shim/loader.c
 leaves about 50 MiB for the ramdisk above the DTB, less the shim's own size (3.5 MB with the menu
 pictures): the image is refused past 46 MiB. Writes nothing to
 the phone.
+
+2026-11-25 --board (default guacamole): the shim Image and every payload's ADT must be for that phone. A hotdogg
+ADT has /sweet-board board = 'hotdogg' (mkadt.py --hotdogg); a guacamole ADT has no /sweet-board. A shim built
+with BOARD=X says "this boot image was built for X" (shim.c board_check); older guacamole shims lack the string
+and are accepted with a warning. The stock boot image's DTB is the generic SM8150 set on both phones (the board
+identity is in dtbo), so it is not checked: the shim checks the phone's real tree at boot instead.
 """
 import argparse, os, pathlib, struct, subprocess, sys, tempfile
 
@@ -65,8 +71,40 @@ def verify_kernel(payload, kernel_path, os_name, build_dir_name):
     print(f"{os_name} kernel provenance: matched {len(kernel_segs)} segments from {kernel_path}")
 
 
+BOARDS = ("guacamole", "hotdogg")
+
+
+def payload_board(payload, name):
+    """The board a SWEETXNU payload's ADT was built for (mkadt.py): 'hotdogg' etc., or 'guacamole' without /sweet-board."""
+    adt_off, adt_size = struct.unpack_from("<QQ", payload, 0x20)
+    adt = payload[adt_off:adt_off + adt_size]
+    if not adt_size or len(adt) != adt_size:
+        sys.exit(f"{name} payload: ADT outside the payload")
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import adt as adtmod
+    root = adtmod.parse(adt)[0]
+    for child in root.children:
+        props = {k: v for k, _, v in child.props}
+        if props.get("name", b"").rstrip(b"\0") == b"sweet-board":
+            return props.get("board", b"?").rstrip(b"\0").decode(errors="replace")
+    return "guacamole"
+
+
+def check_shim_board(path, board):
+    img = open(path, "rb").read()
+    tags = [b for b in BOARDS if b"this boot image was built for " + b.encode() + b"\0" in img]
+    if not tags:
+        if board != "guacamole":
+            sys.exit(f"{path}: not a BOARD={board} shim (build it with BOARD={board} shim/build.sh)")
+        print(f"warning: {path} has no board tag (a shim from before 2026-11-25); taken as guacamole", file=sys.stderr)
+    elif tags != [board]:
+        sys.exit(f"{path} was built for {', '.join(tags)}, not {board}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--board", choices=BOARDS, default="guacamole",
+        help="the phone this image is for (default guacamole); shim and payloads must match")
     ap.add_argument("stock")
     ap.add_argument("shim")
     ap.add_argument("--ios-kernel", required=True,
@@ -82,6 +120,7 @@ def main():
     if len(a.images) == 2 and a.macos_kernel:
         ap.error("--macos-kernel was supplied without a macOS payload")
     stock, shim = a.stock, a.shim
+    check_shim_board(shim, a.board)
     out = a.images[-1]
     imgs = a.images[:-1]
     names = ["iOS 27", "macOS 27"][:len(imgs)]
@@ -93,6 +132,9 @@ def main():
             verify_kernel(p, a.ios_kernel, "iOS", "obj-ios26-sweet")
         elif index == 1:
             verify_kernel(p, a.macos_kernel, "macOS", "obj-macos27-sweet")
+        pb = payload_board(p, name)
+        if pb != a.board:
+            sys.exit(f"{name} payload's ADT is for {pb}, not {a.board} (mkadt.py{' --' + a.board if a.board != 'guacamole' else ''})")
         if want not in c + " ":
             print(f"warning: {name} payload boot-args have no '{want.strip()}': {c[:120]}...", file=sys.stderr)
         pays.append((name, p, c))
@@ -109,6 +151,7 @@ def main():
         subprocess.check_call([sys.executable, os.path.join(here, "mkguacboot.py"), stock, shim, out, "--ramdisk", tmp])
     finally:
         os.unlink(tmp)
+    print(f"board: {a.board}")
     print(f"payloads: " + ", ".join(f"{n} {len(p)} B" for n, p, _ in pays) + f"; ramdisk {len(blob)} B of {RAMDISK_ROOM}; image {os.path.getsize(out)} B")
     for n, _, c in pays:
         print(f"{n} args:", c)

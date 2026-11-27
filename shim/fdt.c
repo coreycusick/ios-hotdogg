@@ -23,6 +23,14 @@ static int streq(const char *a, const char *b)
 	return *a == *b;
 }
 
+/* A node name: "memory" matches "memory" and "memory@80000000" */
+static int node_is(const char *name, const char *want)
+{
+	while (*want && *name == *want)
+		name++, want++;
+	return !*want && (!*name || *name == '@');
+}
+
 static uintptr_t align4(uintptr_t a)
 {
 	return (a + 3) & ~3UL;
@@ -36,8 +44,11 @@ static uintptr_t skip_str(uintptr_t p)
 	return p + 1;
 }
 
-/* Find a property of /chosen: its value address and length. Returns 0 if absent. */
-int fdt_chosen_prop(uintptr_t fdt, const char *prop, uintptr_t *val_out, uint32_t *len_out)
+/*
+ * Find a property of /NODE (a child of the root), or of the root itself when node is 0: its value
+ * address and length. Returns 0 if absent. The root's properties come before its first child.
+ */
+static int node_prop(uintptr_t fdt, const char *node, const char *prop, uintptr_t *val_out, uint32_t *len_out)
 {
 	if (!fdt || be32(fdt) != FDT_MAGIC)
 		return 0;
@@ -52,7 +63,7 @@ int fdt_chosen_prop(uintptr_t fdt, const char *prop, uintptr_t *val_out, uint32_
 		case FDT_BEGIN_NODE: {
 			const char *name = (const char *)p;
 			depth++;
-			in_chosen = depth == 2 && streq(name, "chosen");
+			in_chosen = node ? depth == 2 && node_is(name, node) : depth == 1;
 			p = align4(skip_str(p));
 			break;
 		}
@@ -78,6 +89,49 @@ int fdt_chosen_prop(uintptr_t fdt, const char *prop, uintptr_t *val_out, uint32_
 			return 0;
 		}
 	}
+}
+
+int fdt_chosen_prop(uintptr_t fdt, const char *prop, uintptr_t *val_out, uint32_t *len_out)
+{
+	return node_prop(fdt, "chosen", prop, val_out, len_out);
+}
+
+int fdt_root_prop(uintptr_t fdt, const char *prop, uintptr_t *val_out, uint32_t *len_out)
+{
+	return node_prop(fdt, 0, prop, val_out, len_out);
+}
+
+/*
+ * 2026-11-25: is [start, end) RAM on this phone? ABL writes the real DDR into /memory reg (2+2 cells; on the 8 GB
+ * 7 Pro <0x80000000 0x3bb00000>, <0x1_80000000 0x1_00000000>, <0xc0000000 0xc0000000>: unsorted, adjacent ranges
+ * chain). 1 = covered, 0 = not, -1 = no usable /memory.
+ */
+int fdt_memory_covers(uintptr_t fdt, uint64_t start, uint64_t end, uint64_t *ram_top)
+{
+	uintptr_t v;
+	uint32_t len;
+	if (!node_prop(fdt, "memory", "reg", &v, &len) || len == 0 || len % 16)
+		return -1;
+	uint32_t n = len / 16;
+	uint64_t top = 0;
+	for (uint32_t i = 0; i < n; i++) {
+		uint64_t b = (uint64_t)be32(v + 16 * i) << 32 | be32(v + 16 * i + 4);
+		uint64_t s = (uint64_t)be32(v + 16 * i + 8) << 32 | be32(v + 16 * i + 12);
+		if (b + s > top)
+			top = b + s;
+	}
+	if (ram_top)
+		*ram_top = top;
+	uint64_t cur = start;
+	for (uint32_t pass = 0; pass <= n && cur < end; pass++) {
+		for (uint32_t i = 0; i < n; i++) {
+			uint64_t b = (uint64_t)be32(v + 16 * i) << 32 | be32(v + 16 * i + 4);
+			uint64_t s = (uint64_t)be32(v + 16 * i + 8) << 32 | be32(v + 16 * i + 12);
+			if (b <= cur && cur < b + s)
+				cur = b + s;
+		}
+	}
+	return cur >= end;
 }
 
 int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)

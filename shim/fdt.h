@@ -5,6 +5,10 @@
 int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out);
 /* Value address and length of a /chosen property. Returns 0 if absent. */
 int fdt_chosen_prop(uintptr_t fdt, const char *prop, uintptr_t *val, uint32_t *len);
+/* Is [start, end) RAM per the tree's /memory reg? 1 yes, 0 no, -1 no /memory; *ram_top = end of the highest range. */
+int fdt_memory_covers(uintptr_t fdt, uint64_t start, uint64_t end, uint64_t *ram_top);
+/* The same for a property of the root node (qcom,board-id, model). Returns 0 if absent. */
+int fdt_root_prop(uintptr_t fdt, const char *prop, uintptr_t *val, uint32_t *len);
 /* Header fields (0 for a bad blob): totalsize, size_dt_struct, size_dt_strings. */
 uint32_t fdt_totalsize(uintptr_t fdt);
 uint32_t fdt_size_struct(uintptr_t fdt);

@@ -11,6 +11,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "board.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -148,6 +149,18 @@ const char *loader_boot_n(uintptr_t dtb, int n)
 	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
+
+#if BOARD_MENU
+	/*
+	 * 2026-11-25: the payload's RAM window (plus the 1 MiB panic log above it, mkadt.py /pram) must be RAM on this
+	 * phone: a 7 Pro has 6, 8 or 12 GB (mkadt.py --ram). Checked before anything is copied.
+	 */
+	uint64_t ram_top = 0;
+	if (fdt_memory_covers(dtb, p->phys_base, p->phys_base + p->mem_size + 0x100000, &ram_top) == 0) {
+		con_hex("RAMTOP", ram_top);	/* hidden behind the menu's quiet mode; the reason below is shown */
+		return "this phone has less RAM than the payload was built for (mkadt.py --ram)";
+	}
+#endif
 
 	/* The payload must not overlap where the kernel goes. */
 	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)

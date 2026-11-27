@@ -2,7 +2,7 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--guacamole] [--scale2] [--ram5g]
+address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--guacamole] [--scale2] [--ram5g] [--ram 6|8|12] [--hotdogg]
 """
 import hashlib, os, struct, sys
 
@@ -50,6 +50,52 @@ SCALE2 = '--scale2' in sys.argv
 RAM5G = '--ram5g' in sys.argv
 if RAM5G:
     HIGH_PHYS_BASE, HIGH_MEM_SIZE = 0x100000000, 0x140000000
+# --hotdogg (2026-11-25): OnePlus 7T Pro 5G McLaren, HD1925, 12 GB (docs/hotdogg.md). Same SoC, panel, touch, haptics,
+# PMIC and Wi-Fi as guacamole, so it implies --guacamole and --highmem. /sweet-board carries the board name and the
+# 4085 mAh battery.
+HOTDOGG = '--hotdogg' in sys.argv
+HOTDOGG_BATTERY_MAH = 4085
+# --ram 6|8|12 (2026-11-25, GB of DDR on the phone; implies --highmem): the 7 Pro ships with 6, 8 or 12 GB, the 7T Pro
+# 5G McLaren with 12. DDR on SM8150 is 0x80000000-0xbbb00000 plus 0xc0000000 up to 0x80000000 + RAM, so each size gets
+# XNU's window from 0x1_00000000 and the GPU pool's high range from the window's top to the end of DDR, plus the same
+# four low-bank ranges (sweet_gpu.c gpu_pool_default; fixed carve-outs, the same on every size). The kernel reads the
+# pool from /sweet-gpu pool-ranges; 8 GB guacamole writes none, so its ADT stays what --ram5g makes. The shim
+# (loader.c) refuses a payload whose window is not RAM in the phone's own /memory node.
+#   6 GB:  XNU 3.5 GiB (to 0x1_e0000000), pool 512 MiB high + 1001 MiB low   (untested: no 6 GB phone here)
+#   8 GB:  XNU 5 GiB   (to 0x2_40000000), pool 1 GiB high   + 1001 MiB low   (= --ram5g, the tested guacamole layout)
+#   12 GB: XNU 8 GiB   (to 0x3_00000000), pool 2 GiB high   + 1001 MiB low   (untested: hotdogg, 12 GB 7 Pro)
+RAM_LAYOUTS = {  # GB: ((XNU base, XNU size), (pool high start, end = end of DDR))
+    6: ((0x100000000, 0x0e0000000), (0x1e0000000, 0x200000000)),
+    8: ((0x100000000, 0x140000000), (0x240000000, 0x280000000)),
+    12: ((0x100000000, 0x200000000), (0x300000000, 0x380000000)),
+}
+LOW_POOL = [
+    (0xc4000000, 0xe0000000),    # 448 MiB (0xe0000000 + 16 MiB is wland's radio pool)
+    (0xe1000000, 0xf0000000),    # 240 MiB (0xf0000000: zap metadata)
+    (0xace00000, 0xbbb00000),    # 237 MiB
+    (0xa0000000, 0xa4c00000),    # 76 MiB
+]
+RAM_GB = int(sys.argv[sys.argv.index('--ram') + 1]) if '--ram' in sys.argv else None
+if HOTDOGG:
+    GUACAMOLE = True
+    RAM_GB = RAM_GB or 12
+    if RAM_GB != 12:
+        sys.exit('--hotdogg: the 7T Pro 5G McLaren has 12 GB')
+GPU_POOL = None  # None: no pool-ranges (the kernel's guacamole table)
+if RAM_GB is not None:
+    if RAM_GB not in RAM_LAYOUTS:
+        sys.exit(f'--ram {RAM_GB}: known sizes are ' + ', '.join(map(str, RAM_LAYOUTS)))
+    if not GUACAMOLE:
+        sys.exit('--ram is for --guacamole / --hotdogg')
+    if RAM5G:
+        sys.exit('--ram replaces --ram5g (--ram 8 is the same layout)')
+    (HIGH_PHYS_BASE, HIGH_MEM_SIZE), high = RAM_LAYOUTS[RAM_GB]
+    assert HIGH_PHYS_BASE + HIGH_MEM_SIZE == high[0] and high[1] == 0x80000000 + (RAM_GB << 30)
+    if HOTDOGG or RAM_GB != 8:
+        GPU_POOL = [high] + LOW_POOL
+    if HOTDOGG or RAM_GB != 8:
+        print(f"warning: the {RAM_GB} GB layout{' on hotdogg' if HOTDOGG else ''} has not run on a phone yet "
+              "(check its /proc/iomem)", file=sys.stderr)
 if GUACAMOLE:
     FB_W, FB_H, FB_STRIDE = 1440, 3120, 1440 * 4
     FB_SIZE = 0x1200000
@@ -127,14 +173,22 @@ def node(name, props=(), children=()):
 # --guacamole: Adreno 640 firmware for the kernel's GPU bring-up (sweet_gpu.c,
 # ADT /sweet-gpu), pulled from the phone's /vendor/firmware (not in git).
 GPU_FW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../research/gpu/fw')
+# --hotdogg: its own copy from its /vendor/firmware (the zap shader is signed per OEM build: never assume
+# guacamole's), research/gpu/fw-hotdogg, not in git.
+if HOTDOGG:
+    GPU_FW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../research/gpu/fw-hotdogg')
 
 
 def guac_gpu_node(ph):
     gmu = os.path.join(GPU_FW_DIR, 'a640_gmu.bin')
     if not os.path.exists(gmu):
+        if GPU_POOL:  # without the node the kernel would use the 8 GB guacamole pool table: RAM this phone may lack
+            sys.exit(f'{gmu} missing: --ram {RAM_GB}{" --hotdogg" if HOTDOGG else ""} needs /sweet-gpu for pool-ranges')
         print(f'warning: {gmu} missing, no /sweet-gpu node', file=sys.stderr)
         return []
     props = [ph(), ('compatible', cstr('qcom,adreno-640.1'))]
+    if GPU_POOL:
+        props.append(('pool-ranges', b''.join(u64(a) + u64(b) for a, b in GPU_POOL)))
     for prop, name, limit in (('gmu-firmware', 'a640_gmu.bin', 0x40000),
                               ('sqe-firmware', 'a630_sqe.fw', 0x8004),
                               ('zap-metadata', 'a640_zap.mdt', 0x4000),
@@ -155,6 +209,10 @@ def guac_gpu_node(ph):
 # --guacamole: the AW8697 haptics driver's RAM waveforms (bsd/dev/sweet_haptic.c, ADT /sweet-haptic), from the
 # phone's /vendor/firmware (OnePlus; not in git): the set for this motor's resonance (f0 168.9 Hz -> _168).
 HAPTIC_RAM = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../dtb/haptics/aw8697_haptic_168.bin')
+# --hotdogg: the set for its motor's own f0 (read from the phone, /sys/class/leds/vibrator/f0 or the AW8697 log;
+# aw8697_haptic_<f0>.bin), copied as dtb/hotdogg/aw8697_haptic.bin; not in git.
+if HOTDOGG:
+    HAPTIC_RAM = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../dtb/hotdogg/aw8697_haptic.bin')
 
 
 def guac_haptic_node(ph):
@@ -402,6 +460,14 @@ def build(seed=None, qemu=False, highmem=False):
     # Panic log region. /pram reg = <phys size>; it sits just above the
     # dram-size we expose, so XNU maps it but never allocates into it.
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
+    # --hotdogg: board identity for the kernel (SweetBattery: battery-design-mah). guacamole has no node, so its
+    # ADT stays byte-identical and the kernel keeps its built-in guacamole values.
+    board = [node('sweet-board', [ph(), ('board', cstr('hotdogg')),
+                                  ('battery-design-mah', u32(HOTDOGG_BATTERY_MAH))])] if HOTDOGG and not qemu else []
+    for a, b in GPU_POOL or []:
+        assert a % 0x10000 == 0 and b % 0x10000 == 0 and b > a, (hex(a), hex(b))
+        assert b <= phys_base or a >= phys_base + mem_size, f'GPU pool {a:#x}-{b:#x} overlaps XNU RAM'
+    assert sum(b - a for a, b in GPU_POOL or []) <= 0x100000000, 'GPU pool over the kernel\'s 4 GiB map'
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
@@ -418,13 +484,13 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + (guac_gpu_node(ph) + guac_haptic_node(ph) if GUACAMOLE and not qemu else []) + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + board + (guac_gpu_node(ph) + guac_haptic_node(ph) if GUACAMOLE and not qemu else []) + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':
-    if GUACAMOLE and '--highmem' not in sys.argv:
+    if GUACAMOLE and RAM_GB is None and '--highmem' not in sys.argv:
         sys.exit('--guacamole needs --highmem (the low window crosses a DDR hole)')
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    root = build(qemu='--qemu' in sys.argv, highmem=RAM_GB is not None or '--highmem' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

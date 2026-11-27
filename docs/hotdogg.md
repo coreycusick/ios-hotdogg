@@ -63,3 +63,37 @@ merged or cherry-picked between the two.
    that Android 12's abl keeps an unlocked phone unlocked, and that there is no anti-rollback problem.
 5. Recovery via `fastboot boot`: save boot, dtbo, firmware and `/proc/iomem`; read the GPT.
 6. Repartition (plan above), then the first `fastboot boot` of our shim, then iOS, then macOS.
+
+## Kernel and boot image prep (2026-11-25, before the phone is unlocked)
+- **Kernel** (`xnu/ios27/xnu12377-board-adt.diff`, macos27 patch `0029-board-adt-gpu-pool-battery.patch`, already
+  in the shared `work/xnu-12377`): the GPU pool ranges come from ADT `/sweet-gpu pool-ranges` and the battery
+  design capacity from ADT `/sweet-board battery-design-mah`. Without them (every guacamole ADT) the kernel keeps
+  guacamole's values: pool 2025 MiB in 5 ranges, 4000 mAh. Boot log lines: `SWEET GPU: pool ... from the ADT|the
+  guacamole table`, `SWEET BATTERY: design capacity N mAh`.
+- **`tools/mkadt.py --ram 6|8|12`** (GB of DDR on the phone; implies `--highmem`, replaces `--ram5g`): the 7 Pro
+  ships with 6, 8 or 12 GB. XNU's window starts at 0x1_00000000; the GPU pool's high range runs from its top to the
+  end of DDR (0x80000000 + RAM), plus the same four low ranges:
+  6 GB: XNU 3.5 GiB, pool 1513 MiB. 8 GB: XNU 5 GiB, pool 2025 MiB (`--ram 8` = `--ram5g` exactly, no pool-ranges
+  written). 12 GB: XNU 8 GiB, pool 3049 MiB. Only 8 GB has run on a phone; the others print a warning.
+- **`tools/mkadt.py --hotdogg`** (implies `--guacamole --ram 12`): the 12 GB layout plus `/sweet-board` (hotdogg,
+  4085 mAh). GPU firmware from `research/gpu/fw-hotdogg/`, haptic RAM from `dtb/hotdogg/aw8697_haptic.bin` (both
+  from hotdogg's own /vendor/firmware, not in git). Any layout that writes pool-ranges refuses to build without the
+  GPU firmware (without /sweet-gpu the kernel would use the 8 GB table). Guacamole ADTs from the old flags are
+  unchanged (same dump for every flag set).
+- **Shim `BOARD=hotdogg shim/build.sh`**: same menu as guacamole. Every menu build (guacamole too) now checks the
+  tree ABL passes: `qcom,board-id` <8 0> + "18821" in the model (guacamole) or <8 2> + "19861" (hotdogg). On the
+  wrong phone it shows why and powers off after 60 s, before anything is read or written. The loader also refuses
+  a payload whose RAM window (plus the panic log) is not RAM in the phone's own `/memory` node ("this phone has
+  less RAM than the payload was built for"), before copying anything; the menu then shows that reason. IMEM restart reason and
+  PMIC-PON reboot are guacamole's values until hotdogg's live FDT is read.
+- **`tools/mkmenuboot.py --board guacamole|hotdogg`** (default guacamole): refuses a shim or payload ADT for the
+  other phone. The stock boot.img DTB is the generic SM8150 set on both phones (identity lives in dtbo), so it
+  is not checked; use hotdogg's own stock boot.img anyway.
+
+### To fill in from the phone (after unlock, from TWRP or Android with adb)
+1. From TWRP (root; Android without root shows zeros): `adb shell cat /proc/iomem > backup/hotdogg-iomem.txt` (System RAM ranges: confirm 0x3_80000000 top and that
+   0xa0000000-0xa4c00000, 0xace00000-0xbbb00000, 0xc4000000-0xf0000000, 0xfd800000.. are plain System RAM).
+2. `adb pull /sys/firmware/fdt backup/hotdogg-live.dtb` (board-id, model, restart_reason in msm-imem).
+3. `adb pull /vendor/firmware/a640_gmu.bin`, `a630_sqe.fw`, `a640_zap.mdt`, `a640_zap.b00..b02` into
+   `research/gpu/fw-hotdogg/`; the AW8697 f0 and its `aw8697_haptic_<f0>.bin` into `dtb/hotdogg/aw8697_haptic.bin`.
+4. Stock `boot.img` and `dtbo.img` from the MSM package (or the EDL backup).

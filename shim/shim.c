@@ -16,6 +16,7 @@
 #include "bootsel.h"
 #include "android.h"
 #include "menu.h"
+#include "fdt.h"
 
 #define RESTART_BOOTLOADER	0x77665500U
 #define PSHOLD			0x0c264000UL
@@ -382,13 +383,47 @@ static uint32_t to_us(uint64_t ticks)
 	return ticks * 10 / 192;	/* 19.2 MHz */
 }
 
+#if BOARD_MENU
+/*
+ * 2026-11-25 (hotdogg): is this the phone the image was built for? ABL's tree must have qcom,board-id
+ * <8 BOARD_ID_SUBTYPE> and BOARD_PROJECT in its model ("MTP 18821 18831 21 22" on guacamole, "SDX55M MTP 19861
+ * 53 54" on hotdogg). 0 = yes, otherwise the reason. Nothing has been written anywhere when it runs.
+ */
+static const char *board_check(uint64_t dtb)
+{
+	uintptr_t v;
+	uint32_t len;
+	if (!fdt_root_prop(dtb, "qcom,board-id", &v, &len) || len < 8)
+		return "no qcom,board-id in the bootloader's device tree";
+	const volatile uint8_t *b = (const volatile uint8_t *)v;
+	uint32_t id0 = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+	uint32_t id1 = (uint32_t)b[4] << 24 | b[5] << 16 | b[6] << 8 | b[7];
+	if (id0 != 8 || id1 != BOARD_ID_SUBTYPE)
+		return id1 == 0 ? "this is a OnePlus 7 Pro (board-id 8/0), not " BOARD_NAME :
+		       id1 == 2 ? "this is a OnePlus 7T Pro 5G McLaren (board-id 8/2), not " BOARD_NAME :
+				  "unknown board-id, not " BOARD_NAME;
+	if (!fdt_root_prop(dtb, "model", &v, &len) || len == 0)
+		return "no model in the bootloader's device tree";
+	const char *want = BOARD_PROJECT;
+	const volatile char *m = (const volatile char *)v;
+	for (uint32_t i = 0; i < len; i++) {
+		uint32_t k = 0;
+		while (want[k] && i + k < len && m[i + k] == want[k])
+			k++;
+		if (!want[k])
+			return 0;
+	}
+	return "the model does not name project " BOARD_PROJECT ": not " BOARD_NAME;
+}
+#endif
+
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
-#if defined(BOARD_GUACAMOLE)
+#if BOARD_MENU
 	con_quiet = 1;	/* black until the menu; an error turns the text back on */
 	/* No clear here: the menu clears the screen with the MMU on (3 ms instead of ~190 ms). */
 #else
@@ -397,7 +432,20 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 	con_str("BOARD", BOARD_NAME);
 	con_skip();
-#if defined(BOARD_GUACAMOLE)
+#if BOARD_MENU
+	stage = "board";
+	const char *wrong = board_check(dtb);
+	if (wrong) {	/* wrong phone for this image: say so, then power off (nothing was written) */
+		con_quiet = 0;
+		con_clear(BLACK);
+		con_str("BOARD", "this boot image was built for " BOARD_NAME);
+		con_str("WRONG", wrong);
+		con_str("NEXT", "power off in 60 s; hold power + volume up for fastboot");
+		delay_ms(60000);
+		smc(PSCI_SYSTEM_OFF, 0, 0, 0);
+		for (;;)
+			__asm__ volatile("wfi");
+	}
 	/*
 	 * Boot menu (menu.c), 2026-11-20: pictures of iOS 27 / macOS 27 / Android, then small Restart and
 	 * Power off buttons in the bottom right corner; volume keys to move, power to start.

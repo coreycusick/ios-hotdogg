@@ -5,11 +5,12 @@ cd "$(dirname "$0")"
 CC=aarch64-linux-gnu-gcc
 OBJCOPY=aarch64-linux-gnu-objcopy
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
-# BOARD=guacamole ./build.sh  -> OnePlus 7 Pro (see board.h); default sweet.
+# BOARD=guacamole ./build.sh  -> OnePlus 7 Pro; BOARD=hotdogg -> OnePlus 7T Pro 5G McLaren (see board.h); default sweet.
 BOARD=${BOARD:-sweet}
 case "$BOARD" in
 sweet) ;;
 guacamole) CFLAGS="$CFLAGS -DBOARD_GUACAMOLE" ;;
+hotdogg) CFLAGS="$CFLAGS -DBOARD_HOTDOGG" ;;
 *) echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
 mkdir -p out
@@ -35,10 +36,11 @@ if [ -n "${1:-}" ]; then
 else
 	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
 fi
-if [ "$BOARD" = guacamole ]; then
+if [ "$BOARD" != sweet ]; then
 	# The DTB section must come from the phone's own stock boot.img:
 	#   python3 ../tools/mkguacboot.py STOCK_boot.img out/Image shim-boot.img [--ramdisk out/ramdisk.bin]
-	echo "guacamole: Image built; pack it with tools/mkguacboot.py and your stock boot.img"
+	# (menu images: tools/mkmenuboot.py --board $BOARD; the shim itself refuses to run on the other phone)
+	echo "$BOARD: Image built; pack it with tools/mkmenuboot.py --board $BOARD and that phone's stock boot.img"
 	ls -l out/Image out/ramdisk.bin
 	exit 0
 fi
