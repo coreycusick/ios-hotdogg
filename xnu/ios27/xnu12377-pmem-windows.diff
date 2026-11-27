@@ -1,0 +1,92 @@
+--- a/bsd/dev/sweet_pmem.c
++++ b/bsd/dev/sweet_pmem.c
+@@ -45,6 +45,7 @@
+ #include <vm/vm_kern_xnu.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
++#include <sys/sysctl.h>
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern boolean_t pmap_valid_address(uint64_t pa);
+@@ -84,7 +85,13 @@
+ #define PMEM_RPMH       _IOW('P', 5, struct pmem_rpmh)
+ extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
+ 
+-#define PMEM_MAPS       16              /* 2 MB device windows, round robin */
++/*
++ * 2026-11-26: was 16. wland alone touches ~12 windows (its 16 MB ring/buffer pool at 0xe0000000 is 8, plus WCSS,
++ * SMEM, APCS IPC, TCSR, QMP), adspd its 15 MB FastRPC heap (8) and more, btbridge its own: with 16 shared round robin
++ * nearly every access remapped a window (ml_io_unmap + ml_io_map_unmappable: kernel VM work and a TLB flush on all
++ * CPUs). 64 x 2 MB = 128 MB of kernel VA. kern.sweet_pmem_stats counts hits and remaps.
++ */
++#define PMEM_MAPS       64              /* 2 MB device windows, round robin */
+ #define PMEM_WIN        0x200000ULL
+ 
+ static struct {
+@@ -95,7 +102,8 @@
+ 	vm_offset_t va;
+ 	uint64_t win;
+ } pm_map[PMEM_MAPS];
+-static unsigned pm_map_next;
++static unsigned pm_map_next, pm_map_last;
++static uint64_t pm_st_calls, pm_st_ram, pm_st_hits, pm_st_remaps;
+ static uint32_t pm_bounce[PAGE_SIZE / 4];
+ 
+ static inline uint32_t
+@@ -125,12 +133,20 @@
+ pm_io(uint64_t pa)
+ {
+ 	uint64_t win = pa & ~(PMEM_WIN - 1);
++	if (pm_map[pm_map_last].va && pm_map[pm_map_last].win == win) {
++		pm_st_hits++;
++		return (volatile uint32_t *)(pm_map[pm_map_last].va + (pa - win));
++	}
+ 	for (unsigned i = 0; i < PMEM_MAPS; i++) {
+ 		if (pm_map[i].va && pm_map[i].win == win) {
++			pm_st_hits++;
++			pm_map_last = i;
+ 			return (volatile uint32_t *)(pm_map[i].va + (pa - win));
+ 		}
+ 	}
++	pm_st_remaps++;
+ 	unsigned i = pm_map_next++ % PMEM_MAPS;
++	pm_map_last = i;
+ 	if (pm_map[i].va) {
+ 		ml_io_unmap(pm_map[i].va, PMEM_WIN);
+ 	}
+@@ -144,11 +160,13 @@
+ {
+ 	int err = 0;
+ 	lck_mtx_lock(&sweet_pmem_lock);
++	pm_st_calls++;
+ 	while (!err && uio_resid(uio) > 0) {
+ 		uint64_t pa = (uint64_t)uio_offset(uio);
+ 		uint64_t off = pa & PAGE_MASK;
+ 		unsigned n = (unsigned)MIN((user_ssize_t)(PAGE_SIZE - off), uio_resid(uio));
+ 		if (pmap_valid_address(pa)) {
++			pm_st_ram++;
+ 			caddr_t va = (caddr_t)phystokv(pa);
+ 			flush_dcache64((addr64_t)pa, n, TRUE);
+ 			err = uiomove(va, (int)n, uio);
+@@ -184,6 +202,21 @@
+ }
+ 
+ static int
++sysctl_sweet_pmem_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
++{
++	char s[200];
++	unsigned used = 0;
++	for (unsigned i = 0; i < PMEM_MAPS; i++) {
++		used += pm_map[i].va != 0;
++	}
++	snprintf(s, sizeof(s), "calls %llu | RAM pages %llu | device windows: hits %llu remaps %llu, %u of %u in use",
++	    pm_st_calls, pm_st_ram, pm_st_hits, pm_st_remaps, used, (unsigned)PMEM_MAPS);
++	return SYSCTL_OUT(req, s, strlen(s) + 1);
++}
++SYSCTL_PROC(_kern, OID_AUTO, sweet_pmem_stats, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0,
++    sysctl_sweet_pmem_stats, "A", "/dev/pmem: read/write calls, RAM pages, device window hits and remaps");
++
++static int
+ pm_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ {
+ 	return pm_rw(uio, false);

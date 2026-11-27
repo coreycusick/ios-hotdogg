@@ -1,0 +1,162 @@
+--- a/bsd/dev/sweet_pmem.c
++++ b/bsd/dev/sweet_pmem.c
+@@ -84,6 +84,36 @@
+ };
+ #define PMEM_RPMH       _IOW('P', 5, struct pmem_rpmh)
+ extern int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
++/*
++ * 2026-11-26: map [pa, pa + size) into the caller as device memory (iokit/Kernel/arm/SweetPlatformExpert.cpp
++ * sweet_pmem_map_user). Page aligned, at most 16 MB, and only memory the kernel does not manage: a kernel-managed
++ * page (pm_alloc buffers) is cacheable in the kernel and stays on read/write, which keep it coherent. EPERM then.
++ */
++struct pmem_map {
++	uint64_t pa;            /* in */
++	uint64_t size;          /* in */
++	uint64_t uaddr;         /* out */
++};
++#define PMEM_MAP        _IOWR('P', 6, struct pmem_map)
++#define PMEM_MAP_MAX    (16ull << 20)
++#define PMEM_MAP_LOW    0x100000ull     /* nothing below this is ever mapped into a process */
++extern int sweet_pmem_map_user(uint64_t pa, uint64_t size, uint64_t *uaddr);
++extern void sweet_log_sync(uint32_t ms);
++
++/* sysctl kern.sweet_log_sync=MS: write the console log to the partition now and wait up to MS (tools/pmemtest) */
++static int
++sysctl_sweet_log_sync(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
++{
++	int ms = 0, error = sysctl_handle_int(oidp, &ms, 0, req);
++	if (error || req->newptr == USER_ADDR_NULL) {
++		return error;
++	}
++	sweet_log_sync(ms > 0 && ms <= 5000 ? (uint32_t)ms : 500);
++	return 0;
++}
++SYSCTL_PROC(_kern, OID_AUTO, sweet_log_sync, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_sweet_log_sync,
++    "I", "write the console log to flash now (ms to wait)");
++static uint64_t pm_st_umaps;
+ 
+ /*
+  * 2026-11-26: was 16. wland alone touches ~12 windows (its 16 MB ring/buffer pool at 0xe0000000 is 8, plus WCSS,
+@@ -204,13 +234,13 @@
+ static int
+ sysctl_sweet_pmem_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+ {
+-	char s[200];
++	char s[256];
+ 	unsigned used = 0;
+ 	for (unsigned i = 0; i < PMEM_MAPS; i++) {
+ 		used += pm_map[i].va != 0;
+ 	}
+-	snprintf(s, sizeof(s), "calls %llu | RAM pages %llu | device windows: hits %llu remaps %llu, %u of %u in use",
+-	    pm_st_calls, pm_st_ram, pm_st_hits, pm_st_remaps, used, (unsigned)PMEM_MAPS);
++	snprintf(s, sizeof(s), "calls %llu | RAM pages %llu | device windows: hits %llu remaps %llu, %u of %u in use | "
++	    "user maps %llu", pm_st_calls, pm_st_ram, pm_st_hits, pm_st_remaps, used, (unsigned)PMEM_MAPS, pm_st_umaps);
+ 	return SYSCTL_OUT(req, s, strlen(s) + 1);
+ }
+ SYSCTL_PROC(_kern, OID_AUTO, sweet_pmem_stats, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0,
+@@ -370,6 +400,29 @@
+ 		}
+ 		break;
+ 	}
++	case PMEM_MAP: {
++		struct pmem_map *m = (struct pmem_map *)data;
++		lck_mtx_unlock(&sweet_pmem_lock);       /* mapping into the caller's map: not under our lock */
++		if (m->size == 0 || m->size > PMEM_MAP_MAX || ((m->pa | m->size) & PAGE_MASK) || m->pa + m->size < m->pa) {
++			return EINVAL;
++		}
++		/* 2026-11-26: mapping the window at physical 0 (pmemtest 0x100000) took the phone down inside the map call */
++		if (m->pa < PMEM_MAP_LOW) {
++			return EINVAL;
++		}
++		for (uint64_t o = 0; o < m->size; o += PAGE_SIZE) {
++			if (pmap_valid_address(m->pa + o)) {
++				return EPERM;
++			}
++		}
++		err = sweet_pmem_map_user(m->pa, m->size, &m->uaddr);
++		printf("SWEET PMEM: map %#llx +%#llx into pid %d: %d at %#llx\n", m->pa, m->size, proc_selfpid(), err,
++		    err ? 0ull : m->uaddr);
++		if (err == 0) {
++			__atomic_fetch_add(&pm_st_umaps, 1, __ATOMIC_RELAXED);
++		}
++		return err;
++	}
+ 	case PMEM_RPMH: {
+ 		struct pmem_rpmh *r = (struct pmem_rpmh *)data;
+ 		r->res[sizeof(r->res) - 1] = 0;
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -195,4 +195,73 @@
+  * which is what the iPhone userland (MobileGestalt) expects. The earlier
+  * "sweet" / "Redmi Note 10 Pro" overrides are gone for that reason.
+  */
++
++/*
++ * 2026-11-26: /dev/pmem PMEM_MAP (bsd/dev/sweet_pmem.c). Maps physical memory the kernel does not manage
++ * (registers, carve-outs, the wland/adspd pools) into the calling process as device memory, the same attributes
++ * /dev/pmem's own windows use (VM_WIMG_IO), so wland/adspd/btbridge read and write it with plain loads and stores
++ * instead of one pread/pwrite per access (~48,000 system calls a second at idle). The IOMemoryMap is kept here,
++ * with the pid; maps of processes that are gone are released when a new map is asked for.
++ */
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOLocks.h>
++#include <sys/proc.h>
++#include <sys/errno.h>
++
++#define SWEET_UMAPS 256
++static struct {
++	int pid;
++	IOMemoryMap *map;
++} sweet_umaps[SWEET_UMAPS];
++static IOLock *sweet_umap_lock;
++
++extern "C" int sweet_pmem_map_user(uint64_t pa, uint64_t size, uint64_t *uaddr);
++
++extern "C" int
++sweet_pmem_map_user(uint64_t pa, uint64_t size, uint64_t *uaddr)
++{
++	if (sweet_umap_lock == NULL) {
++		IOLock *l = IOLockAlloc();
++		if (!OSCompareAndSwapPtr(NULL, l, (void * volatile *)&sweet_umap_lock)) {
++			IOLockFree(l);
++		}
++	}
++	IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(pa, size, kIODirectionInOut, TASK_NULL);
++	if (md == NULL) {
++		return ENOMEM;
++	}
++	IOMemoryMap *map = md->createMappingInTask(current_task(), 0, kIOMapAnywhere | kIOMapInhibitCache);
++	md->release();
++	if (map == NULL) {
++		return ENOMEM;
++	}
++	int pid = proc_selfpid(), slot = -1;
++	IOLockLock(sweet_umap_lock);
++	for (int i = 0; i < SWEET_UMAPS; i++) {
++		if (sweet_umaps[i].map != NULL) {
++			proc_t p = proc_find(sweet_umaps[i].pid);
++			if (p == NULL) {
++				sweet_umaps[i].map->release();
++				sweet_umaps[i].map = NULL;
++			} else {
++				proc_rele(p);
++			}
++		}
++		if (sweet_umaps[i].map == NULL && slot < 0) {
++			slot = i;
++		}
++	}
++	if (slot >= 0) {
++		sweet_umaps[slot].pid = pid;
++		sweet_umaps[slot].map = map;
++	}
++	IOLockUnlock(sweet_umap_lock);
++	if (slot < 0) {
++		map->release();
++		return ENOSPC;
++	}
++	*uaddr = map->getAddress();
++	return 0;
++}
++
+ #endif /* SWEET */

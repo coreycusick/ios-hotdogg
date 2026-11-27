@@ -392,6 +392,7 @@ int main(int argc, char **argv)
 		b = boot_controller(0);
 	if (b)
 		return 1;
+	pm_direct_on("btbridge: controller up");
 	if (ensure_hcd())
 		return 1;
 	int m = open_host();

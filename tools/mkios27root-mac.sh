@@ -325,6 +325,8 @@ p, want = sys.argv[1], sys.argv[2:]
 J = {
     'wland': ('/System/Library/LaunchDaemons/com.sweet.wland.plist', {
         'Label': 'com.sweet.wland', 'ProgramArguments': ['/var/local/bin/wland', 'up', '0'], 'RunAtLoad': True,
+        # PMEM_DIRECT=1 (2026-11-26): /dev/pmem through a direct mapping once the radio is up (userland/wland/pmem.c)
+        'EnvironmentVariables': {'PMEM_DIRECT': '1'},
         'POSIXSpawnType': 'Interactive', 'StandardOutPath': '/var/local/wland.out',
         'StandardErrorPath': '/var/local/wland.out'}),
     'sshd': ('/System/Library/LaunchDaemons/com.sweet.sshd.plist', {
@@ -353,11 +355,11 @@ J['bars'] = ('/System/Library/LaunchDaemons/com.sweet.bars.plist', {
     'StandardErrorPath': '/var/local/bars.out'})
 J['adspd'] = ('/System/Library/LaunchDaemons/com.sweet.adspd.plist', {
     'Label': 'com.sweet.adspd', 'ProgramArguments': ['/var/local/bin/adspd', 'serve'], 'RunAtLoad': True,
-    'KeepAlive': True, 'EnvironmentVariables': {'ADSPD_BOOT': '30'}, 'POSIXSpawnType': 'Interactive',
+    'KeepAlive': True, 'EnvironmentVariables': {'ADSPD_BOOT': '30', 'PMEM_DIRECT': '1'}, 'POSIXSpawnType': 'Interactive',
     'StandardOutPath': '/var/local/adspd.out', 'StandardErrorPath': '/var/local/adspd.out'})
 J['btbridge'] = ('/System/Library/LaunchDaemons/com.sweet.btbridge.plist', {
     'Label': 'com.sweet.btbridge', 'ProgramArguments': ['/var/local/bin/btbridge', '-q'], 'RunAtLoad': True,
-    'KeepAlive': True, 'ThrottleInterval': 10, 'POSIXSpawnType': 'Interactive',
+    'KeepAlive': True, 'EnvironmentVariables': {'PMEM_DIRECT': '1'}, 'ThrottleInterval': 10, 'POSIXSpawnType': 'Interactive',
     'StandardOutPath': '/var/local/btbridge.out', 'StandardErrorPath': '/var/local/btbridge.out'})
 J['spinwatch'] = ('/System/Library/LaunchDaemons/com.sweet.spinwatch.plist', {
     'Label': 'com.sweet.spinwatch', 'ProgramArguments': ['/var/local/bin/spinwatch', 'locationd'], 'RunAtLoad': True,

@@ -50,6 +50,9 @@ void pm_smc(uint64_t x[8]);		/* x0..x7 in, x0..x3 out */
 int pm_list(struct pmem_list *l);
 int pm_rpmh(const char *res, unsigned n, const uint32_t *off, const uint32_t *val);	/* errno or 0 */
 void delay_ms(unsigned ms);
+/* 2026-11-26: direct mapped access (pmem.c) only after the program says its hardware is up AND PMEM_DIRECT=1 is in the
+ * environment; bring-up always goes through the kernel (wland's direct bring-up crash-dumped the SoC). */
+void pm_direct_on(const char *why);
 int wait_bit(uint64_t pa, uint32_t mask, int set, unsigned ms);	/* 0 = ok */
 
 #endif

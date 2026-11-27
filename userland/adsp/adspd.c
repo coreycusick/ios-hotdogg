@@ -1929,6 +1929,7 @@ static int serve(void)
 	}
 	if (bring_up(0))
 		return 1;
+	pm_direct_on("adspd: ADSP up");
 	unlink(CMD_FIFO);
 	if (mkfifo(CMD_FIFO, 0600)) {
 		perror(CMD_FIFO);

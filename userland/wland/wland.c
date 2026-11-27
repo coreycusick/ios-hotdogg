@@ -738,7 +738,10 @@ static int net(unsigned secs)
 			printf("net: WLFW bring-up failed\n");
 		} else if (!getenv("WLAND_NO_RADIO")) {
 			delay_ms(100);	/* topaz: only after mission mode; before it a CE access hangs the bus */
-			if (radio_start())
+			int radio_failed = radio_start();
+			if (!radio_failed)
+				pm_direct_on("wland: WLFW and radio up");	/* steady-state ring polling only */
+			if (radio_failed)
 				printf("net: radio start failed\n");
 			else if (bridge_open() == 0)
 				bridge_joins = 1;	/* guacamole: wifid joins (its saved networks); our own wlan.conf

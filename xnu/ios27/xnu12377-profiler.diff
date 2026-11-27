@@ -1,0 +1,414 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -965,6 +965,8 @@
+ #include <vm/vm_shared_region_xnu.h>
+ #include <vm/vm_map_internal.h>
+ #include <arm/thread.h>
++#include <kern/machine.h>        /* cause_ast_check (the profiler below) */
++#include <kern/clock.h>          /* delay */
+ 
+ /*
+  * SWEET crash report on the console. The phone has no way to get crash
+@@ -1182,6 +1184,121 @@
+ 	task_unlock(task);
+ }
+ 
++/*
++ * 2026-11-26 profiler (bsd/dev/sweet_sample.c, sysctl kern.sweet_profile): the user stacks of the threads of TASK that
++ * are running or waiting for a CPU right now (blocked threads use no CPU and are left out). A thread on another CPU
++ * saves its user registers only when it enters the kernel, so those CPUs get an AST IPI first and the saved state is
++ * where the thread is now, not where its last system call was. out: per thread `depth` slots, pc, lr, then the
++ * frame-pointer chain, ended by 0. Returns the number of threads written.
++ */
++int sweet_profile_stacks(task_t task, uint64_t *out, int max_threads, int depth);
++int sweet_profile_images(task_t task, uint64_t cache_lo, uint64_t cache_hi, char *s, int cap);
++void sweet_profile_task_info(task_t task, uint64_t *slide, uint64_t *mh);
++
++/* The shared region slide and the main binary's mach header, as sweet_sample_task prints them. */
++void
++sweet_profile_task_info(task_t task, uint64_t *slide, uint64_t *mh)
++{
++	vm_shared_region_t sr = vm_shared_region_get(task);
++	*slide = 0;
++	if (sr != NULL) {
++		*slide = sr->sr_slide;
++		vm_shared_region_deallocate(sr);
++	}
++	*mh = task->mach_header_vm_address;
++}
++
++int
++sweet_profile_stacks(task_t task, uint64_t *out, int max_threads, int depth)
++{
++	vm_map_t map = get_task_map(task);
++	processor_t self = current_processor();
++	thread_t thread;
++	int nt = 0, kicked = 0;
++
++	task_lock(task);
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		processor_t p = thread->last_processor;
++		if ((thread->state & (TH_RUN | TH_WAIT)) == TH_RUN && p != PROCESSOR_NULL && p != self &&
++		    p->active_thread == thread) {
++			cause_ast_check(p);
++			kicked++;
++		}
++	}
++	if (kicked) {
++		delay(20);      /* the IPI'd threads trap and save their user state */
++	}
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		if (nt >= max_threads) {
++			break;
++		}
++		if ((thread->state & (TH_RUN | TH_WAIT)) != TH_RUN) {
++			continue;
++		}
++		arm_saved_state_t *ss = find_user_regs(thread);
++		if (ss == NULL || !is_saved_state64(ss)) {
++			continue;
++		}
++		uint64_t *o = out + (size_t)nt * (size_t)depth;
++		uint64_t fp = get_saved_state_fp(ss);
++		int i = 0;
++		o[i++] = get_saved_state_pc(ss);
++		o[i++] = get_saved_state_lr(ss);
++		while (i < depth - 1 && fp != 0 && (fp & 7) == 0) {
++			uint64_t frame[2];
++			if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++				break;
++			}
++			o[i++] = frame[1];
++			if (frame[0] <= fp) {
++				break;
++			}
++			fp = frame[0];
++		}
++		o[i] = 0;
++		nt++;
++	}
++	task_unlock(task);
++	return nt;
++}
++
++/*
++ * The images dyld has loaded outside the shared cache (the main binary, plugins such as AdrenoMetal), from the
++ * task's dyld_all_image_infos: "img LOAD PATH" lines into s. Returns the length written.
++ */
++int
++sweet_profile_images(task_t task, uint64_t cache_lo, uint64_t cache_hi, char *s, int cap)
++{
++	vm_map_t map = get_task_map(task);
++	uint64_t info = task->all_image_info_addr;
++	struct {
++		uint32_t version, count;
++		uint64_t array;
++	} head;
++	int n = 0;
++
++	if (info == 0 || vm_map_read_user(map, info, &head, sizeof(head)) != KERN_SUCCESS || head.array == 0) {
++		return snprintf(s, cap, "img none (no dyld image list)\n");
++	}
++	for (uint32_t i = 0; i < head.count && i < 4096 && n < cap - 300; i++) {
++		uint64_t e[3];  /* load address, path, mod date */
++		char path[220];
++		if (vm_map_read_user(map, head.array + 24ull * i, e, sizeof(e)) != KERN_SUCCESS) {
++			break;
++		}
++		if (e[0] >= cache_lo && e[0] < cache_hi) {
++			continue;
++		}
++		path[0] = 0;
++		if (e[1] == 0 || vm_map_read_user(map, e[1], path, sizeof(path)) != KERN_SUCCESS) {
++			strlcpy(path, "?", sizeof(path));
++		}
++		path[sizeof(path) - 1] = 0;
++		n += snprintf(s + n, cap - n, "img 0x%llx %s\n", e[0], path);
++	}
++	return n;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ kern_return_t
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -19,6 +19,11 @@
+ #include <kern/task.h>
+ #include <kern/thread.h>
+ #include <pexpert/pexpert.h>
++#include <sys/sysctl.h>
++#include <sys/errno.h>
++#include <kern/kalloc.h>
++#include <kern/clock.h>
++#include <kern/sched_prim.h>
+ 
+ extern task_t proc_task(proc_t);
+ extern int hz;
+@@ -86,3 +91,266 @@
+ 		thread_deallocate(thread);
+ 	}
+ }
++
++/*
++ * 2026-11-26 profiler: where does a process spend its CPU?
++ *
++ *   sysctl kern.sweet_profile="backboardd 10"     start: sample NAME's running threads every 1 ms for SECS (1-60)
++ *   sysctl -n kern.sweet_profile                  "running ..." until done, then the report
++ *
++ * Each tick takes the user stack of every thread of the process that is on a CPU or waiting for one
++ * (osfmk/kern/exception.c sweet_profile_stacks: CPUs running them get an IPI first, so the position is current).
++ * The report: the shared region slide, the images outside the shared cache with their load addresses, then the
++ * addresses seen most often as the leaf (pc: where the time is spent) and anywhere in the stack (inclusive: which
++ * callers it is spent under; return addresses as found, i.e. just after the call). A thread in a system call shows
++ * the call's stub as its leaf, so kernel time is charged to the user code that asked for it.
++ * tools/sweet-profile.py turns the report into function names. One profile at a time.
++ */
++#define PROF_SLOTS      8192u           /* per table, power of two */
++#define PROF_THREADS    64
++#define PROF_DEPTH      24
++#define PROF_TOP        300
++#define PROF_REPORT     (128u << 10)
++#define PROF_CACHE_LO   0x180000000ull  /* shared cache range before the slide (tools/sweet-crash.py) */
++#define PROF_CACHE_HI   0x300000000ull
++#define PROF_VA_MASK    0x0000007fffffffffull
++
++extern int sweet_profile_stacks(task_t task, uint64_t *out, int max_threads, int depth);
++extern int sweet_profile_images(task_t task, uint64_t cache_lo, uint64_t cache_hi, char *s, int cap);
++extern void sweet_profile_task_info(task_t task, uint64_t *slide, uint64_t *mh);
++
++struct prof_slot {
++	uint64_t a;
++	uint32_t n, pad;
++};
++
++static int prof_running;                /* 1 while a profile thread runs */
++static char *prof_report;               /* the last report (PROF_REPORT bytes), kept until the next profile */
++static char prof_name[32];
++static int prof_pid, prof_secs;
++static uint64_t prof_slide, prof_mh;
++
++static bool
++prof_add(struct prof_slot *t, uint64_t a, uint32_t *dropped)
++{
++	uint32_t h = (uint32_t)((a * 0x9E3779B97F4A7C15ull) >> 51);    /* 13 bits */
++	for (uint32_t i = 0; i < PROF_SLOTS; i++) {
++		struct prof_slot *s = &t[(h + i) & (PROF_SLOTS - 1)];
++		if (s->a == a) {
++			s->n++;
++			return true;
++		}
++		if (s->a == 0) {
++			s->a = a;
++			s->n = 1;
++			return true;
++		}
++	}
++	(*dropped)++;
++	return false;
++}
++
++/* The PROF_TOP biggest counts of t as "tag COUNT ADDR" lines (empties t). */
++static int
++prof_top(struct prof_slot *t, const char *tag, char *s, int cap)
++{
++	int n = 0;
++	for (int k = 0; k < PROF_TOP && n < cap - 64; k++) {
++		struct prof_slot *best = NULL;
++		for (uint32_t i = 0; i < PROF_SLOTS; i++) {
++			if (t[i].n && (best == NULL || t[i].n > best->n)) {
++				best = &t[i];
++			}
++		}
++		if (best == NULL) {
++			break;
++		}
++		n += snprintf(s + n, cap - n, "%s %u 0x%llx\n", tag, best->n, best->a);
++		best->n = 0;
++	}
++	return n;
++}
++
++static void
++prof_wait_ms(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	assert_wait_deadline((event_t)&prof_running, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++sweet_profile_thread(void *arg, __unused wait_result_t wr)
++{
++	task_t task = (task_t)arg;
++	size_t table = PROF_SLOTS * sizeof(struct prof_slot), stacks = PROF_THREADS * PROF_DEPTH * sizeof(uint64_t);
++	struct prof_slot *leaf = kalloc_data(table, Z_WAITOK | Z_ZERO), *incl = kalloc_data(table, Z_WAITOK | Z_ZERO);
++	uint64_t *st = kalloc_data(stacks, Z_WAITOK | Z_ZERO);
++	char *r = kalloc_data(PROF_REPORT, Z_WAITOK | Z_ZERO);
++	uint64_t ticks = 0, samples = 0, begin = mach_absolute_time(), end, now, ns;
++	uint32_t dropped = 0, maxrun = 0;
++
++	clock_interval_to_deadline((uint32_t)prof_secs * 1000u, NSEC_PER_MSEC, &end);
++	if (leaf && incl && st && r) {
++		while ((now = mach_absolute_time()) < end) {
++			int nt = sweet_profile_stacks(task, st, PROF_THREADS, PROF_DEPTH);
++			ticks++;
++			samples += (uint64_t)nt;
++			if ((uint32_t)nt > maxrun) {
++				maxrun = (uint32_t)nt;
++			}
++			for (int t = 0; t < nt; t++) {
++				uint64_t *f = st + (size_t)t * PROF_DEPTH, seen[PROF_DEPTH];
++				int ns_ = 0;
++				if (f[0] == 0) {
++					continue;
++				}
++				prof_add(leaf, f[0] & PROF_VA_MASK, &dropped);
++				for (int i = 0; i < PROF_DEPTH && f[i] != 0; i++) {
++					uint64_t a = f[i] & PROF_VA_MASK;
++					bool dup = false;
++					for (int j = 0; j < ns_; j++) {
++						dup = dup || seen[j] == a;
++					}
++					if (!dup) {
++						seen[ns_++] = a;
++						prof_add(incl, a, &dropped);
++					}
++				}
++			}
++			prof_wait_ms(1);
++		}
++		absolutetime_to_nanoseconds(mach_absolute_time() - begin, &ns);
++		int n = snprintf(r, PROF_REPORT, "profile %s[%d] %llu ms, %llu ticks, %llu thread samples (%llu.%02llu threads "
++		    "running per tick on average, %u at most), %u dropped\nslide 0x%llx mh 0x%llx\n", prof_name, prof_pid,
++		    ns / 1000000, ticks, samples, ticks ? samples / ticks : 0, ticks ? (samples * 100 / ticks) % 100 : 0,
++		    maxrun, dropped, prof_slide, prof_mh);
++		n += sweet_profile_images(task, PROF_CACHE_LO + prof_slide, PROF_CACHE_HI + prof_slide, r + n,
++		    (int)PROF_REPORT / 4);
++		n += prof_top(leaf, "leaf", r + n, (int)PROF_REPORT - n);
++		n += prof_top(incl, "incl", r + n, (int)PROF_REPORT - n);
++		printf("SWEET PROFILE: %s[%d] done: %llu ticks, %llu samples, report %d bytes (sysctl -n kern.sweet_profile)\n",
++		    prof_name, prof_pid, ticks, samples, n);
++	} else {
++		if (r) {
++			snprintf(r, PROF_REPORT, "profile %s: out of memory\n", prof_name);
++		}
++	}
++	task_deallocate(task);
++	if (leaf) {
++		kfree_data(leaf, table);
++	}
++	if (incl) {
++		kfree_data(incl, table);
++	}
++	if (st) {
++		kfree_data(st, stacks);
++	}
++	char *old = prof_report;
++	prof_report = r;
++	if (old) {
++		kfree_data(old, PROF_REPORT);
++	}
++	__atomic_store_n(&prof_running, 0, __ATOMIC_RELEASE);
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static int prof_found_pid;
++
++static int
++prof_find(proc_t p, void *arg)
++{
++	char name[32];
++	proc_name(proc_pid(p), name, sizeof(name));
++	if (prof_found_pid == 0 && strcmp(name, (const char *)arg) == 0) {
++		prof_found_pid = proc_pid(p);
++	}
++	return PROC_RETURNED;
++}
++
++static int
++sweet_profile_start(const char *cmd)
++{
++	char name[32] = "";
++	int secs = 10, i = 0;
++	while (*cmd == ' ') {
++		cmd++;
++	}
++	while (*cmd && *cmd != ' ' && i < (int)sizeof(name) - 1) {
++		name[i++] = *cmd++;
++	}
++	name[i] = 0;
++	while (*cmd == ' ') {
++		cmd++;
++	}
++	if (*cmd) {
++		secs = 0;
++		while (*cmd >= '0' && *cmd <= '9') {
++			secs = secs * 10 + (*cmd++ - '0');
++		}
++	}
++	if (name[0] == 0 || secs < 1 || secs > 60) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&prof_running, 1, __ATOMIC_ACQ_REL)) {
++		return EBUSY;
++	}
++	prof_found_pid = 0;
++	proc_iterate(PROC_ALLPROCLIST, prof_find, name, NULL, NULL);
++	proc_t p = prof_found_pid ? proc_find(prof_found_pid) : PROC_NULL;
++	task_t task = p != PROC_NULL ? proc_task(p) : TASK_NULL;
++	if (task == TASK_NULL) {
++		if (p != PROC_NULL) {
++			proc_rele(p);
++		}
++		__atomic_store_n(&prof_running, 0, __ATOMIC_RELEASE);
++		return ESRCH;
++	}
++	task_reference(task);
++	proc_rele(p);
++	strlcpy(prof_name, name, sizeof(prof_name));
++	prof_pid = prof_found_pid;
++	prof_secs = secs;
++	sweet_profile_task_info(task, &prof_slide, &prof_mh);
++	thread_t thread;
++	if (kernel_thread_start(sweet_profile_thread, task, &thread) != KERN_SUCCESS) {
++		task_deallocate(task);
++		__atomic_store_n(&prof_running, 0, __ATOMIC_RELEASE);
++		return ENOMEM;
++	}
++	thread_deallocate(thread);
++	printf("SWEET PROFILE: %s[%d] for %d s\n", prof_name, prof_pid, secs);
++	return 0;
++}
++
++static int
++sysctl_sweet_profile(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
++{
++	if (req->newptr != USER_ADDR_NULL) {
++		char cmd[64];
++		if (req->newlen == 0 || req->newlen >= sizeof(cmd)) {
++			return EINVAL;
++		}
++		int error = SYSCTL_IN(req, cmd, req->newlen);
++		if (error) {
++			return error;
++		}
++		cmd[req->newlen] = 0;
++		return sweet_profile_start(cmd);
++	}
++	if (__atomic_load_n(&prof_running, __ATOMIC_ACQUIRE) || prof_report == NULL) {
++		char s[160];
++		if (prof_running) {
++			snprintf(s, sizeof(s), "running: %s[%d] for %d s\n", prof_name, prof_pid, prof_secs);
++		} else {
++			strlcpy(s, "no profile yet: sysctl kern.sweet_profile=\"backboardd 10\"\n", sizeof(s));
++		}
++		return SYSCTL_OUT(req, s, strlen(s) + 1);
++	}
++	return SYSCTL_OUT(req, prof_report, strlen(prof_report) + 1);
++}
++SYSCTL_PROC(_kern, OID_AUTO, sweet_profile, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_sweet_profile,
++    "A", "sampling profiler: write \"NAME SECS\", read the report");
++

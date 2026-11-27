@@ -60,6 +60,7 @@ build mpsprobe jb/mpsprobe.m -fobjc-arc -framework Foundation -framework Metal
 build surfprobe jb/surfprobe.m -fobjc-arc -framework Foundation -framework IOSurface -framework IOKit
 # Bluetooth step 1, read-only: WCN3990 UART (QUP wrapper 2 SE3) clocks, pins and engine: /var/local/bin/btprobe
 build btprobe bt/btprobe.c wland/pmem.c -Iwland
+build pmemtest wland/pmemtest.c     # 2026-11-26: /dev/pmem direct-map crash finder (reads only)
 # Bluetooth step 2: WCN3990 over its UART (clock, pins, GENI UART, power pulses, first HCI): /var/local/bin/btuart
 build btuart bt/btuart.c wland/pmem.c -Iwland
 # Bluetooth part 2: bluetoothd / BlueTool <-> WCN3998 through a pty at /dev/cu.bluetooth: /var/local/bin/btbridge
