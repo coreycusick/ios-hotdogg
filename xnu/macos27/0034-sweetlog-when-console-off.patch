@@ -1,0 +1,36 @@
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -595,6 +595,13 @@
+ console_write(char *str, int size)
+ {
+ 	if (disableConsoleOutput) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/*
++		 * 2026-11-26: the video console turns console output off once the GUI boots, and printf text then stopped
++		 * here, before _cnputs: the persistent log (sweet_log_append) ended ~3 KB into every boot. Keep it.
++		 */
++		sweet_log_append(str, size);
++#endif
+ 		return;
+ 	}
+ 
+@@ -619,6 +626,9 @@
+ 		_cnputs(str, size, true);
+ 		return;
+ 	} else if (__improbable(!console_io_allowed())) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		sweet_log_append(str, size);    /* as above */
++#endif
+ 		return;
+ 	}
+ 
+@@ -680,6 +690,9 @@
+ console_write_unbuffered(char c)
+ {
+ 	if (disableConsoleOutput) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		sweet_log_append(&c, 1);        /* as in console_write */
++#endif
+ 		return;
+ 	}
+ 
